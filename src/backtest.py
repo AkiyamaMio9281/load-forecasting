@@ -46,6 +46,11 @@ from src.config import (
 from src.features import FEATURE_COLS, cutoff_of_op_date, target_index_for
 from src.models.base import BaseModel
 
+# Multiples of the observed training range that a forecast may not leave. Wide enough
+# that no sane model trips them, tight enough to catch a divergence immediately.
+PLAUSIBLE_LOW = 0.25
+PLAUSIBLE_HIGH = 4.0
+
 
 # --------------------------------------------------------------------------- #
 # Model registry -- imports are lazy so a missing optional dep (torch) only
@@ -202,6 +207,18 @@ def run_fold(model: BaseModel, features: pd.DataFrame, fold: Fold) -> tuple[np.n
         raise ValueError(f"{model.name} returned shape {y_pred.shape}, want ({HORIZON},)")
     if not np.isfinite(y_pred).all():
         raise ValueError(f"{model.name} returned non-finite predictions in fold {fold.fold}")
+
+    # A diverging model produces numbers that are finite and absurd -- an unconstrained
+    # ARIMA once returned 1e60 MW here, which `isfinite` happily accepted. Bound the
+    # output by the training range so a blow-up fails the fold instead of quietly
+    # entering the comparison table.
+    observed = history["y"]
+    low, high = observed.min() * PLAUSIBLE_LOW, observed.max() * PLAUSIBLE_HIGH
+    if (y_pred < low).any() or (y_pred > high).any():
+        raise ValueError(
+            f"{model.name} fold {fold.fold}: predictions outside [{low:,.0f}, {high:,.0f}] MW "
+            f"(got [{y_pred.min():,.3g}, {y_pred.max():,.3g}]) -- the fit has diverged"
+        )
     return y_pred, elapsed
 
 

@@ -74,13 +74,18 @@ class SarimaFourierModel(BaseModel):
         with warnings.catch_warnings():
             # Convergence chatter on a 17k-point series is noise, not information.
             warnings.simplefilter("ignore")
+            # enforce_stationarity is NOT optional here. Relaxing it lets the optimiser
+            # put an AR root inside the unit circle, and the forecast then grows
+            # geometrically -- observed as predictions reaching 1e60 MW on one dataset
+            # while looking perfectly sane on another. A constrained fit that converges
+            # slightly worse beats an unconstrained one that occasionally detonates.
             model = ARIMA(
                 y,
                 exog=exog,
                 order=self.order,
                 trend="c",
-                enforce_stationarity=False,
-                enforce_invertibility=False,
+                enforce_stationarity=True,
+                enforce_invertibility=True,
             )
             self.result_ = model.fit(method_kwargs={"warn_convergence": False})
 

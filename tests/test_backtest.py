@@ -118,6 +118,47 @@ def test_run_fold_returns_one_prediction_per_target_hour(features: pd.DataFrame,
     assert elapsed >= 0
 
 
+class _DivergingModel:
+    """Stands in for an unconstrained ARIMA whose forecast grows geometrically."""
+
+    name = "diverging"
+
+    def fit(self, history: pd.DataFrame) -> None:
+        self._level = float(history["y"].iloc[-1])
+
+    def predict(self, horizon_index, future_exog=None) -> np.ndarray:
+        return self._level * np.power(2.0, np.arange(1, len(horizon_index) + 1))
+
+
+class _NanModel(_DivergingModel):
+    name = "nan"
+
+    def predict(self, horizon_index, future_exog=None) -> np.ndarray:
+        return np.full(len(horizon_index), np.nan)
+
+
+def test_run_fold_rejects_a_diverging_forecast(features: pd.DataFrame, folds) -> None:
+    """A blow-up is finite and absurd -- isfinite alone would let 1e60 MW through."""
+    with pytest.raises(ValueError, match="diverged"):
+        run_fold(_DivergingModel(), features, folds[0])
+
+
+def test_run_fold_rejects_non_finite_predictions(features: pd.DataFrame, folds) -> None:
+    with pytest.raises(ValueError, match="non-finite"):
+        run_fold(_NanModel(), features, folds[0])
+
+
+def test_plausibility_band_admits_a_real_forecast(features: pd.DataFrame, folds) -> None:
+    """The guard must not be so tight that an honest model trips it."""
+    from src.backtest import PLAUSIBLE_HIGH, PLAUSIBLE_LOW
+
+    for fold in folds:
+        history = features.loc[features.index <= fold.cutoff, "y"]
+        y_pred, _ = run_fold(SeasonalNaiveModel(), features, fold)
+        assert (y_pred > history.min() * PLAUSIBLE_LOW).all()
+        assert (y_pred < history.max() * PLAUSIBLE_HIGH).all()
+
+
 def test_naive_reproduces_the_previous_day(features: pd.DataFrame, folds) -> None:
     fold = folds[3]
     y_pred, _ = run_fold(NaiveModel(), features, fold)
