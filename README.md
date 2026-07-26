@@ -9,9 +9,10 @@ rolling-origin protocol that refits every model from scratch 52 times, scores al
 them on identical target points, and is guarded by a leakage test suite that tries to
 break it three different ways.
 
-> **Status:** pipeline, models, service and tests are complete and green
-> (`110 tests`). The headline metrics below are regenerated from the real PJME series
-> by `make results`; see [RESULTS](#results).
+> **Status:** complete. 118 tests green, CI green, and the model is
+> [live on Cloud Run](https://forecast-api-399546784543.us-central1.run.app/docs).
+> Every number below is regenerated from the real PJME series by
+> `python -m src.report --readme` — none is typed by hand.
 
 ---
 
@@ -158,16 +159,43 @@ right-skewed by a handful of extreme-weather days.
 
 <!-- RESULTS:END -->
 
-Figures (regenerate with `python -m src.report --all`):
+### The comparison, and where the error lives
 
-| | |
-|---|---|
-| `figures/01_seasonality.png` | daily profile by day type + weekday × hour surface |
-| `figures/03_load_vs_temperature.png` | the temperature U that motivates HDD/CDD |
-| `figures/05_model_comparison.png` | MAPE and MASE across the five models |
-| `figures/06_pred_vs_actual.png` | best and worst folds |
-| `figures/07_error_heatmap.png` | MAPE by hour × month |
-| `figures/09_feature_importance.png` | LightGBM top-15 gain |
+![Model comparison over 52 rolling-origin folds](figures/05_model_comparison.png)
+
+Read MASE, not MAPE: 1.0 is the "no better than last week" line. But note from the
+significance table above that `sarima` and `prophet` sit below 1.0 *without*
+statistically beating the baseline — MASE alone would have overstated both.
+
+![MAPE by local hour and month](figures/07_error_heatmap.png)
+
+The error is not spread evenly. It concentrates in **summer afternoons** — the
+cooling-driven peak, where a degree of temperature error costs the most megawatts.
+Overnight hours in shoulder months are nearly free to predict.
+
+![Day-ahead forecast against actual load, best and worst folds](figures/06_pred_vs_actual.png)
+
+The worst fold is the more useful panel: the model tracks the shape but
+under-predicts the peak, which is the characteristic failure on extreme days.
+
+### What the EDA settled
+
+![Load has three nested cycles: daily, weekly, yearly](figures/01_seasonality.png)
+
+![Load vs temperature: the classic U](figures/03_load_vs_temperature.png)
+
+The U is why the weather features are two one-sided hinges (`hdd`, `cdd`) rather than
+a linear temperature term — a single slope would average the heating and cooling arms
+into approximately nothing.
+
+![LightGBM top-15 features by gain](figures/09_feature_importance.png)
+
+Lags and the rolling weekly mean dominate. That is also the explanation for Prophet's
+result: it has no lag term at all, and at a 24-hour horizon the recent level *is* most
+of the signal.
+
+Remaining figures — STL decomposition, ACF/PACF, error-by-hour across models — are in
+[figures/](figures/). Regenerate everything with `python -m src.report --all --readme`.
 
 ---
 
@@ -226,7 +254,12 @@ curl -X POST "https://forecast-api-399546784543.us-central1.run.app/forecast" \
   predictions identical to the offline model to the last decimal (max deviation
   0.000000 MW across the 24-hour horizon).
 - Model and feature table load **once at lifespan startup**, not per request — Cloud Run
-  reuses a warm process, so that turns a ~2s cost into ~5ms per forecast.
+  reuses a warm process, so that cost is paid once rather than on every forecast.
+- **Measured on the live service:** ~19s cold start after scale-to-zero, then ~120ms per
+  request end-to-end (including the round trip to `us-central1`); ~30ms measured against
+  the same image locally. `min-instances 0` is the deliberate trade — a demo that costs
+  nothing at idle in exchange for a slow first call. A production deployment that cared
+  about tail latency would set `min-instances 1` and pay for it.
 - The serving image installs `app/requirements-serve.txt` only (no prophet, statsmodels or
   torch): the container ships one model, so it should not carry four frameworks' worth of
   cold start.
