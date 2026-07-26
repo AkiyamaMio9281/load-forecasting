@@ -83,7 +83,13 @@ def compare_models(a: pd.DataFrame, b: pd.DataFrame, name_a: str, name_b: str) -
 
     diff = mae_a - mae_b  # negative => a is better
     wins = int((diff < 0).sum())
-    statistic, p_value = stats.wilcoxon(mae_a, mae_b)
+
+    if (diff == 0).all():
+        # Identical forecasts. scipy raises rather than returning a p-value here, but
+        # the answer is well defined: no evidence whatsoever of a difference.
+        statistic, p_value = 0.0, 1.0
+    else:
+        statistic, p_value = stats.wilcoxon(mae_a, mae_b)
 
     return {
         "model_a": name_a,

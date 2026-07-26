@@ -235,6 +235,7 @@ def test_compare_models_finds_no_difference_against_itself(features: pd.DataFram
     results = run_backtest("snaive", features, folds, verbose=False)
     comparison = compare_models(results, results, "a", "b")
     assert comparison["mean_diff"] == pytest.approx(0.0)
+    assert comparison["p_value"] == 1.0
     assert not comparison["significant_at_05"]
 
 
