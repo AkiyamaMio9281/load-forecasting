@@ -361,20 +361,39 @@ def plot_feature_importance(top_n: int = 15) -> str:
 # =========================================================================== #
 # Tables and conclusions
 # =========================================================================== #
+def diagnostic_results(model_name: str) -> tuple[pd.DataFrame, str]:
+    """Load the run that grouped analysis should use, and say which one it is.
+
+    The headline protocol steps 7 days, so all 52 of its folds land on the same
+    weekday -- a weekday/weekend split computed from it would be meaningless. The
+    dense run (step 2, coprime with 7) covers all seven weekdays over the same year
+    and is preferred whenever it exists.
+    """
+    dense = f"{model_name}_dense"
+    if results_path(dense).exists():
+        return load_results(dense), dense
+    return load_results(model_name), model_name
+
+
 def error_tables(model_name: str) -> dict[str, pd.DataFrame]:
     """MAPE/RMSE/MAE broken out by hour, day type and month."""
-    results = load_results(model_name)
+    results, source = diagnostic_results(model_name)
     results["day_type"] = np.where(results["is_weekend"] == 1, "weekend", "weekday")
-    return {
+    tables = {
         "by_hour": grouped_errors(results, "hour"),
         "by_day_type": grouped_errors(results, "day_type"),
         "by_month": grouped_errors(results, "month"),
     }
+    for table in tables.values():
+        table.attrs["source"] = source
+    return tables
 
 
 def business_findings(model_name: str) -> list[str]:
     """Derive the report's conclusions from the numbers rather than asserting them."""
     tables = error_tables(model_name)
+    protocol = tables["by_hour"].attrs.get("source", model_name)
+    dense = protocol.endswith("_dense")
     by_hour, by_day, by_month = tables["by_hour"], tables["by_day_type"], tables["by_month"]
 
     worst_hour = by_hour["MAPE"].idxmax()
@@ -391,48 +410,104 @@ def business_findings(model_name: str) -> list[str]:
         f"{MONTH_LABELS[best_month - 1]} at {by_month.loc[best_month, 'MAPE']:.2%} -- "
         f"error tracks temperature-driven demand, not calendar position.",
     ]
-    if {"weekday", "weekend"} <= set(by_day.index):
+    if {"weekday", "weekend"} <= set(by_day.index) and dense:
         weekday, weekend = by_day.loc["weekday", "MAPE"], by_day.loc["weekend", "MAPE"]
-        harder = "weekends" if weekend > weekday else "weekdays"
+        relative = abs(weekend - weekday) / min(weekday, weekend)
+        if relative < 0.05:
+            # 3.31% vs 3.28% is not a finding. Reporting it as one would imply the
+            # model handles day types differently when the data says it does not.
+            findings.append(
+                f"Day type barely matters: {weekend:.2%} weekend vs {weekday:.2%} weekday, a "
+                f"{relative:.0%} relative gap. The calendar features have absorbed the weekly "
+                f"cycle, so weekends are not a distinct weak spot."
+            )
+        else:
+            harder = "weekends" if weekend > weekday else "weekdays"
+            findings.append(
+                f"{harder.capitalize()} are harder: {weekend:.2%} weekend vs {weekday:.2%} "
+                f"weekday ({relative:.0%} relative difference)."
+            )
+    elif not dense:
         findings.append(
-            f"{harder.capitalize()} are harder: {weekend:.2%} weekend vs {weekday:.2%} weekday "
-            f"({abs(weekend - weekday) / min(weekday, weekend):.0%} relative difference)."
+            "Weekday/weekend split omitted: the 7-day fold step lands every target on the "
+            "same weekday. Run `--folds 182 --step 2 --suffix _dense` to measure it."
         )
+
+    findings.append(
+        f"Grouped figures above come from the `{protocol}` run"
+        + (
+            " (182 folds, 2-day step, all seven weekdays across one year)."
+            if dense
+            else " (52-fold headline protocol)."
+        )
+    )
     return findings
 
 
 def significance_table(model_names: list[str]) -> pd.DataFrame:
-    """Pairwise paired tests down the ranking: is each step a real improvement?
+    """Two questions per model, against fixed references.
 
-    Without this, a comparison table invites reading every gap as a ranking. Two of
-    the gaps in this project's results do not survive the test, and saying so is the
-    difference between a report and a leaderboard.
+    Deliberately *not* a chain of adjacent pairs down the ranking: a run of
+    "not significant" steps from A to D says nothing about A vs D, and reading it
+    that way makes a table of genuinely different models look undifferentiated.
+    The questions worth answering are fixed-reference ones -- does this model beat
+    the baseline, and is it distinguishable from the one being shipped.
     """
-    from src.metrics import compare_models
+    from src.metrics import SNAIVE_REF, compare_models
 
-    ranked = [m for m in viz.order_models(model_names) if results_path(m).exists()]
-    ranked.sort(
-        key=lambda m: load_results(m).pipe(lambda r: (r["y_true"] - r["y_pred"]).abs().mean())
+    available = [m for m in viz.order_models(model_names) if results_path(m).exists()]
+    cached = {m: load_results(m) for m in available}
+    ranked = sorted(
+        available, key=lambda m: (cached[m]["y_true"] - cached[m]["y_pred"]).abs().mean()
     )
+    shipped = "lgbm" if "lgbm" in ranked else ranked[0]
 
     rows = []
-    for better, worse in zip(ranked, ranked[1:], strict=False):
-        rows.append(compare_models(load_results(better), load_results(worse), better, worse))
-    return pd.DataFrame(rows)
+    for model in ranked:
+        row = {
+            "model": model,
+            "mae": float((cached[model]["y_true"] - cached[model]["y_pred"]).abs().mean()),
+            "beats_baseline_p": np.nan,
+            "beats_baseline": False,
+            "vs_shipped_p": np.nan,
+            "differs_from_shipped": False,
+        }
+        if model != SNAIVE_REF and SNAIVE_REF in cached:
+            versus = compare_models(cached[model], cached[SNAIVE_REF], model, SNAIVE_REF)
+            row["beats_baseline_p"] = versus["p_value"]
+            row["beats_baseline"] = versus["significant_at_05"] and versus["mean_diff"] < 0
+        if model != shipped:
+            versus = compare_models(cached[shipped], cached[model], shipped, model)
+            row["vs_shipped_p"] = versus["p_value"]
+            row["differs_from_shipped"] = versus["significant_at_05"]
+        rows.append(row)
+
+    frame = pd.DataFrame(rows)
+    frame.attrs["shipped"] = shipped
+    return frame
 
 
 def render_significance(table: pd.DataFrame) -> str:
+    shipped = table.attrs.get("shipped", "lgbm")
     lines = [
-        "| better | worse | MAE | MAE | folds won | p | verdict |",
-        "|---|---|---|---|---|---|---|",
+        f"| model | MAE (MW) | beats seasonal naive? | distinguishable from `{shipped}`? |",
+        "|---|---|---|---|",
     ]
     for _, r in table.iterrows():
-        verdict = "**significant**" if r["significant_at_05"] else "not significant"
-        lines.append(
-            f"| {r['model_a']} | {r['model_b']} | {r['mae_a']:,.0f} | {r['mae_b']:,.0f} | "
-            f"{int(r['a_wins_folds'])}/{int(r['n_folds'])} | "
-            f"{r['p_value']:.4f} | {verdict} |"
-        )
+        if r["model"] == "snaive":
+            beats = "— *is* the baseline"
+        elif r["beats_baseline"]:
+            beats = f"**yes** (p={r['beats_baseline_p']:.4f})"
+        else:
+            beats = f"**no** (p={r['beats_baseline_p']:.2f})"
+
+        if r["model"] == shipped:
+            differs = "— shipped"
+        elif r["differs_from_shipped"]:
+            differs = f"yes, worse (p={r['vs_shipped_p']:.4f})"
+        else:
+            differs = f"**no — statistical tie** (p={r['vs_shipped_p']:.2f})"
+        lines.append(f"| `{r['model']}` | {r['mae']:,.0f} | {beats} | {differs} |")
     return "\n".join(lines)
 
 
@@ -511,16 +586,25 @@ def update_readme(summary: pd.DataFrame, model: str = "lgbm") -> str:
 
     findings = business_findings(model)
     significance = significance_table(list(summary.index))
-    ties = significance[~significance["significant_at_05"]]
-    tie_note = (
-        "Not every gap in that table is a result: "
-        + "; ".join(
-            f"**{r['model_a']} vs {r['model_b']}** is a statistical tie "
-            f"(p={r['p_value']:.2f}, won {int(r['a_wins_folds'])}/{int(r['n_folds'])} folds)"
-            for _, r in ties.iterrows()
+    shipped = significance.attrs.get("shipped", model)
+    ties = significance[(significance["model"] != shipped) & ~significance["differs_from_shipped"]]
+    lost_to_baseline = significance[
+        (significance["model"] != "snaive") & ~significance["beats_baseline"]
+    ]
+
+    notes = []
+    if len(ties):
+        names = ", ".join(f"`{m}`" for m in ties["model"])
+        notes.append(
+            f"{names} cannot be distinguished from `{shipped}` on this evidence — the raw "
+            f"MAPE ordering between them is not a result."
         )
-        + "."
-    )
+    if len(lost_to_baseline):
+        names = ", ".join(f"`{m}`" for m in lost_to_baseline["model"])
+        notes.append(
+            f"{names} do **not** beat the seasonal-naive baseline at p<0.05, despite MASE "
+            f"values below 1.0. A MASE of 0.94 over 52 folds is within noise of 1.0."
+        )
 
     block = "\n".join(
         [
@@ -530,16 +614,16 @@ def update_readme(summary: pd.DataFrame, model: str = "lgbm") -> str:
             "",
             render_markdown_table(summary, model),
             "",
-            "### Is each step down the table real?",
+            "### Which of those differences are real?",
             "",
-            "Paired Wilcoxon signed-rank on per-fold MAE. Paired because both models",
+            "Paired Wilcoxon signed-rank on per-fold MAE — paired because both models",
             "forecast the *same* target points, which removes fold difficulty from the",
             "comparison; signed-rank rather than a t-test because fold errors are",
             "right-skewed by a handful of extreme-weather days.",
             "",
             render_significance(significance),
             "",
-            *([tie_note, ""] if len(ties) else []),
+            *([f"- {n}" for n in notes] + [""] if notes else []),
             "**What the errors say:**",
             "",
             *[f"{i}. {f}" for i, f in enumerate(findings, 1)],
@@ -587,10 +671,15 @@ def main() -> None:
         summary = build_summary(list(viz.MODEL_ORDER))
         summary.to_csv(RESULTS_DIR / "summary.csv")
         results = load_results(args.model)
+        # Error *structure* (hour x month, hour profile) comes from the dense run so
+        # it is not describing 182 copies of the same weekday; the headline model
+        # comparison stays on the 52-fold protocol.
+        diagnostic, protocol = diagnostic_results(args.model)
+        print(f"[report] grouped analysis uses '{protocol}' ({diagnostic['fold'].nunique()} folds)")
         written += [
             plot_model_comparison(summary),
             plot_best_worst_folds(results, args.model),
-            plot_error_heatmap(results, args.model),
+            plot_error_heatmap(diagnostic, args.model),
             plot_error_by_hour(list(summary.index)),
             plot_feature_importance(),
         ]
