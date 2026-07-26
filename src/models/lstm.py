@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 from src.config import HORIZON
+from src.features import target_index_for
 from src.models.base import BaseModel
 
 SEQ_LEN = 168  # one week of history feeds the encoder
@@ -87,21 +88,53 @@ class LstmModel(BaseModel):
     def _assemble(
         self, table: pd.DataFrame, days: list
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Stack per-day (history sequence, exogenous block, target) tensors."""
-        y_by_ts = table["y"]
-        sequences, exogs, targets = [], [], []
-        for day in days:
-            rows = table[table["op_date"] == day]
-            if len(rows) != HORIZON:
-                continue
-            cutoff = rows["cutoff_ts"].iloc[0]
-            window = y_by_ts.loc[cutoff - pd.Timedelta(hours=SEQ_LEN - 1) : cutoff]
-            if len(window) != SEQ_LEN or window.isna().any():
-                continue
-            sequences.append(window.to_numpy())
-            exogs.append(rows[list(EXOG_COLS)].to_numpy().ravel())
-            targets.append(rows["y"].to_numpy())
-        return np.asarray(sequences), np.asarray(exogs), np.asarray(targets)
+        """Stack per-day (history sequence, exogenous block, target) tensors.
+
+        Addressed by row position rather than by timestamp lookup. The clean grid is
+        a gapless hourly index, so the 24 rows of an operating day and the 168 rows
+        before it are fixed offsets from that day's first row -- which turns the whole
+        assembly into two fancy-index reads instead of a per-day filter and slice.
+
+        The loop this replaces was quadratic (a full-column scan per day, on an
+        object-dtype date column) and cost ~4 minutes per fold on the real series
+        while the GPU sat idle.
+        """
+        if not days:
+            return (
+                np.empty((0, SEQ_LEN)),
+                np.empty((0, len(EXOG_COLS) * HORIZON)),
+                np.empty((0, HORIZON)),
+            )
+
+        index = table.index
+        y = table["y"].to_numpy(dtype=float)
+        exog_matrix = table[list(EXOG_COLS)].to_numpy(dtype=float)
+
+        starts = np.searchsorted(index, [target_index_for(d)[0] for d in days])
+        # Keep only days with a full week of history behind them and 24 rows ahead.
+        keep = (starts >= SEQ_LEN) & (starts + HORIZON <= len(index))
+        starts = starts[keep]
+        if not len(starts):
+            return (
+                np.empty((0, SEQ_LEN)),
+                np.empty((0, len(EXOG_COLS) * HORIZON)),
+                np.empty((0, HORIZON)),
+            )
+
+        seq_idx = starts[:, None] + np.arange(-SEQ_LEN, 0)[None, :]
+        tgt_idx = starts[:, None] + np.arange(HORIZON)[None, :]
+
+        sequences = y[seq_idx]
+        targets = y[tgt_idx]
+        exogs = exog_matrix[tgt_idx].reshape(len(starts), -1)
+
+        # Drop any day whose window still carries a NaN, exactly as the loop did.
+        finite = (
+            np.isfinite(sequences).all(axis=1)
+            & np.isfinite(targets).all(axis=1)
+            & np.isfinite(exogs).all(axis=1)
+        )
+        return sequences[finite], exogs[finite], targets[finite]
 
     # --- interface ------------------------------------------------------------ #
     def fit(self, history: pd.DataFrame) -> None:
@@ -114,7 +147,10 @@ class LstmModel(BaseModel):
 
         history = self._truncate(history)
         usable = history[history["bad_day"] == 0]
-        days = sorted({d for d in usable["op_date"] if (usable["op_date"] == d).sum() == HORIZON})
+        # groupby, not a comprehension over rows: the previous form iterated all ~53k
+        # rows and ran a full-column comparison inside each iteration.
+        day_sizes = usable.groupby("op_date").size()
+        days = sorted(day_sizes[day_sizes == HORIZON].index)
         sequences, exogs, targets = self._assemble(history, days)
         if len(sequences) < 50:
             raise ValueError(f"lstm: only {len(sequences)} usable training days")

@@ -228,13 +228,35 @@ uvicorn app.main:app --reload --port 8080
 docker build -f app/Dockerfile -t forecast-api . ; docker run --rm -p 8080:8080 forecast-api
 ```
 
-Deploy to Cloud Run:
+Deploy to Cloud Run. The image is built and tested **locally first**, then pushed —
+so what runs in production is the same image that answered a `curl` on your laptop,
+not a second build performed in the cloud:
 
 ```bash
-gcloud run deploy forecast-api --source . \
-  --region us-central1 --min-instances 0 --max-instances 1 \
+PROJECT=your-project-id
+REGION=us-central1
+IMAGE="$REGION-docker.pkg.dev/$PROJECT/forecast/forecast-api:latest"
+
+gcloud services enable run.googleapis.com artifactregistry.googleapis.com --project "$PROJECT"
+gcloud artifacts repositories create forecast --repository-format=docker --location="$REGION"
+gcloud auth configure-docker "$REGION-docker.pkg.dev"
+
+docker build -f app/Dockerfile -t "$IMAGE" .
+docker push "$IMAGE"
+
+gcloud run deploy forecast-api --image "$IMAGE" \
+  --region "$REGION" --min-instances 0 --max-instances 1 \
   --memory 1Gi --allow-unauthenticated
 ```
+
+`min-instances 0` means you pay nothing when idle; `max-instances 1` caps the blast
+radius of an unexpected traffic spike.
+
+> If you prefer `--source .`, note that gcloud falls back to `.gitignore` when no
+> `.gcloudignore` exists — and `.gitignore` excludes `app/artifacts/*.joblib`, the
+> one file the container cannot start without. The build succeeds and the container
+> crashes on startup. This repo ships a [.gcloudignore](.gcloudignore) that keeps the
+> artifact, so both paths work.
 
 ## Layout
 

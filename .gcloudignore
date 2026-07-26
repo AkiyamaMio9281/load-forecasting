@@ -1,0 +1,24 @@
+# Build context for `gcloud run deploy --source .`
+#
+# This file exists for one specific reason. Without it, gcloud falls back to
+# .gitignore to decide what to upload -- and .gitignore excludes
+# `app/artifacts/*.joblib`, which is exactly the model the container needs. The
+# build would succeed and the container would then crash on startup looking for a
+# file that was never uploaded. Keeping this file means the artifact ships.
+.git
+.github
+.gitignore
+.pytest_cache
+.ruff_cache
+__pycache__/
+*.pyc
+notebooks/
+tests/
+data/
+results/
+figures/
+sql/
+*.md
+requirements.txt
+
+# NOT ignored, deliberately: app/artifacts/ -- the serving model lives there.

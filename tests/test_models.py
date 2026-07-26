@@ -138,6 +138,52 @@ def test_lgbm_rejects_a_missing_exog_block(fold, fold_inputs) -> None:
         model.predict(fold.target_index, None)
 
 
+def test_lstm_assembly_matches_a_naive_per_day_loop(fold_inputs) -> None:
+    """The vectorised assembly must equal the obvious loop, element for element.
+
+    `_assemble` addresses rows by position on the gapless hourly grid instead of
+    filtering per day. That is 272x faster on the real series, and worth nothing if
+    it quietly builds different tensors -- so the slow, obviously-correct version is
+    kept here as the oracle.
+    """
+    pytest.importorskip("torch", reason="lstm is an optional extra")
+    from src.config import HORIZON as H
+    from src.models.lstm import EXOG_COLS, SEQ_LEN, LstmModel
+
+    history, _ = fold_inputs
+    usable = history[history["bad_day"] == 0]
+    sizes = usable.groupby("op_date").size()
+    days = sorted(sizes[sizes == H].index)
+
+    y_by_ts = history["y"]
+    seq_ref, exog_ref, tgt_ref = [], [], []
+    for day in days:
+        rows = history[history["op_date"] == day]
+        if len(rows) != H:
+            continue
+        cutoff = rows["cutoff_ts"].iloc[0]
+        window = y_by_ts.loc[cutoff - pd.Timedelta(hours=SEQ_LEN - 1) : cutoff]
+        if len(window) != SEQ_LEN or window.isna().any():
+            continue
+        seq_ref.append(window.to_numpy())
+        exog_ref.append(rows[list(EXOG_COLS)].to_numpy().ravel())
+        tgt_ref.append(rows["y"].to_numpy())
+
+    sequences, exogs, targets = LstmModel(seed=42)._assemble(history, days)
+    assert np.array_equal(sequences, np.asarray(seq_ref))
+    assert np.array_equal(exogs, np.asarray(exog_ref))
+    assert np.array_equal(targets, np.asarray(tgt_ref))
+
+
+def test_lstm_assembly_handles_an_empty_day_list(fold_inputs) -> None:
+    pytest.importorskip("torch", reason="lstm is an optional extra")
+    from src.models.lstm import LstmModel
+
+    history, _ = fold_inputs
+    sequences, exogs, targets = LstmModel(seed=42)._assemble(history, [])
+    assert len(sequences) == len(exogs) == len(targets) == 0
+
+
 def test_lstm_matches_the_interface(fold, fold_inputs) -> None:
     pytest.importorskip("torch", reason="lstm is an optional extra")
     from src.models.lstm import LstmModel
