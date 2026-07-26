@@ -26,6 +26,7 @@ from src.config import (
     RESULTS_DIR,
     ensure_dirs,
 )
+from src.features import FEATURE_COLS
 from src.metrics import fold_maes, grouped_errors, mape
 
 MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -400,6 +401,46 @@ def business_findings(model_name: str) -> list[str]:
     return findings
 
 
+def weather_ablation(n_folds: int = 8, seed: int = 42) -> pd.DataFrame:
+    """Refit LightGBM with the weather block zeroed out, and report the gap.
+
+    The `temp`/`hdd`/`cdd` features read the realised temperature at the target hour,
+    i.e. they assume a perfect weather forecast. Every report states that caveat;
+    this measures it. The gap is the part of the accuracy that a production system --
+    which only has a numerical weather prediction -- would have to earn back.
+    """
+    from src.backtest import make_folds
+    from src.models.lgbm import LgbmDirectModel
+
+    features = pd.read_parquet(FEATURES_PARQUET)
+    folds = make_folds(features, n_folds=n_folds)
+    blanked = dict.fromkeys(("temp", "hdd", "cdd", "temp_lag24"), 0.0)
+
+    rows = []
+    for fold in folds:
+        history = features.loc[features.index <= fold.cutoff]
+        exog = features.loc[fold.target_index, list(FEATURE_COLS)]
+        y_true = features.loc[fold.target_index, "y"].to_numpy()
+
+        with_weather = LgbmDirectModel(seed=seed)
+        with_weather.fit(history)
+
+        without = LgbmDirectModel(seed=seed)
+        without.fit(history.assign(**blanked))
+
+        rows.append(
+            {
+                "fold": fold.fold,
+                "target_date": fold.target_date,
+                "mape_with_weather": mape(y_true, with_weather.predict(fold.target_index, exog)),
+                "mape_without_weather": mape(
+                    y_true, without.predict(fold.target_index, exog.assign(**blanked))
+                ),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 # =========================================================================== #
 # README injection
 # =========================================================================== #
@@ -461,6 +502,13 @@ def main() -> None:
     parser.add_argument("--all", action="store_true", help="both")
     parser.add_argument("--model", default="lgbm", help="model the result figures describe")
     parser.add_argument("--readme", action="store_true", help="rewrite the README results block")
+    parser.add_argument(
+        "--ablation",
+        type=int,
+        default=0,
+        metavar="N",
+        help="measure the perfect-weather assumption over N folds",
+    )
     args = parser.parse_args()
     if not (args.eda or args.results or args.all):
         args.all = True
@@ -498,6 +546,19 @@ def main() -> None:
         print("\n=== Business findings ===")
         for i, finding in enumerate(business_findings(args.model), 1):
             print(f"{i}. {finding}")
+
+        if args.ablation:
+            table = weather_ablation(n_folds=args.ablation)
+            table.to_csv(RESULTS_DIR / "weather_ablation.csv", index=False)
+            with_w = table["mape_with_weather"].mean()
+            without_w = table["mape_without_weather"].mean()
+            print(f"\n=== Perfect-weather ablation ({args.ablation} folds) ===")
+            print(f"  with weather   : {with_w:.2%}")
+            print(f"  without weather: {without_w:.2%}")
+            print(
+                f"  the assumption is worth {without_w - with_w:.2%} MAPE "
+                f"({without_w / with_w - 1:+.0%} relative)"
+            )
 
         if args.readme:
             print(f"\n=== README updated: {update_readme(summary, args.model)} ===")
