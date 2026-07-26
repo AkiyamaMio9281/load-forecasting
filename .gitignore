@@ -1,0 +1,36 @@
+# ---- 私有规划文档（不发布到 GitHub）----
+CLAUDE.md
+SPEC.md
+PLAN.md
+HUMAN_TASKS.md
+RESULTS.md
+INTERVIEW_PREP.md
+项目设计文档.md
+
+# ---- 数据与工件 ----
+data/raw/
+data/processed/
+*.csv
+*.parquet
+!results/summary.csv
+app/artifacts/*.joblib
+
+# ---- 密钥 ----
+.env
+*.env
+kaggle.json
+*credentials*
+
+# ---- Python ----
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# ---- 其他 ----
+*.log
+.DS_Store

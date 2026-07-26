@@ -1,0 +1,16 @@
+# Serving dependencies only -- deliberately not requirements.txt.
+#
+# The container ships one model (LightGBM). Pulling in prophet/statsmodels/torch
+# would add hundreds of MB and seconds of cold start to an image that never calls
+# them. Cloud Run bills cold starts, so the image carries exactly what /forecast
+# touches: feature construction, the booster, and the web layer.
+pandas==2.2.3
+numpy==1.26.4
+pyarrow==17.0.0
+lightgbm==4.5.0
+scikit-learn==1.5.2
+holidays==0.57
+joblib==1.4.2
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+pydantic==2.9.2
