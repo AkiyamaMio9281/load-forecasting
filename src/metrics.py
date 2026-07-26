@@ -63,6 +63,42 @@ def summarize(results: pd.DataFrame, reference: pd.DataFrame | None = None) -> d
     return row
 
 
+def compare_models(a: pd.DataFrame, b: pd.DataFrame, name_a: str, name_b: str) -> dict:
+    """Is `a` really better than `b`, or is the gap fold-to-fold noise?
+
+    A headline table invites reading a 0.02pp MAPE gap as a ranking. With 52 folds
+    that gap is usually indistinguishable from zero. This runs a paired test on the
+    per-fold MAE differences -- paired because both models forecast the *same* target
+    points, which removes fold difficulty from the comparison and is far more
+    sensitive than comparing two independent means.
+
+    Wilcoxon signed-rank rather than a t-test: 52 fold errors are right-skewed
+    (a few extreme-weather days dominate), so normality is not a safe assumption.
+    """
+    from scipy import stats
+
+    mae_a, mae_b = fold_maes(a), fold_maes(b)
+    if not mae_a.index.equals(mae_b.index):
+        raise ValueError("cannot compare models scored on different folds")
+
+    diff = mae_a - mae_b  # negative => a is better
+    wins = int((diff < 0).sum())
+    statistic, p_value = stats.wilcoxon(mae_a, mae_b)
+
+    return {
+        "model_a": name_a,
+        "model_b": name_b,
+        "mae_a": float(mae_a.mean()),
+        "mae_b": float(mae_b.mean()),
+        "mean_diff": float(diff.mean()),
+        "a_wins_folds": wins,
+        "n_folds": len(diff),
+        "wilcoxon_stat": float(statistic),
+        "p_value": float(p_value),
+        "significant_at_05": bool(p_value < 0.05),
+    }
+
+
 def grouped_errors(results: pd.DataFrame, by: str) -> pd.DataFrame:
     """MAPE / RMSE / MAE broken out by a column of `results` (hour, month, ...)."""
 

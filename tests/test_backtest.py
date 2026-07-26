@@ -216,6 +216,37 @@ def test_fold_maes_are_per_fold(features: pd.DataFrame, folds) -> None:
     assert (maes > 0).all()
 
 
+def test_compare_models_detects_a_real_difference(features: pd.DataFrame, folds) -> None:
+    from src.metrics import compare_models
+
+    naive = run_backtest("naive", features, folds, verbose=False)
+    snaive_res = run_backtest("snaive", features, folds, verbose=False)
+    result = compare_models(naive, snaive_res, "naive", "snaive")
+
+    assert result["n_folds"] == len(folds)
+    assert 0.0 <= result["p_value"] <= 1.0
+    assert result["mean_diff"] == pytest.approx(result["mae_a"] - result["mae_b"], rel=1e-6)
+
+
+def test_compare_models_finds_no_difference_against_itself(features: pd.DataFrame, folds) -> None:
+    """Identical inputs must not produce a significant result."""
+    from src.metrics import compare_models
+
+    results = run_backtest("snaive", features, folds, verbose=False)
+    comparison = compare_models(results, results, "a", "b")
+    assert comparison["mean_diff"] == pytest.approx(0.0)
+    assert not comparison["significant_at_05"]
+
+
+def test_compare_models_rejects_mismatched_folds(features: pd.DataFrame, folds) -> None:
+    from src.metrics import compare_models
+
+    full = run_backtest("naive", features, folds, verbose=False)
+    partial = full[full["fold"] > 1]
+    with pytest.raises(ValueError, match="different folds"):
+        compare_models(full, partial, "a", "b")
+
+
 def test_summarize_reports_every_headline_metric(features: pd.DataFrame, folds) -> None:
     results = run_backtest("naive", features, folds, verbose=False)
     reference = run_backtest("snaive", features, folds, verbose=False)
